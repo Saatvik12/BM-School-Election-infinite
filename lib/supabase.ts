@@ -5,10 +5,19 @@ const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || 'placeholde
 
 export const supabase = createClient(supabaseUrl, supabaseAnonKey)
 
+export type Role = {
+  id: number
+  name: string           // e.g. "SPL", "ASPL", "House Captain"
+  display_order: number
+  active: boolean
+}
+
 export type Candidate = {
   id: number
-  position: 'SPL' | 'ASPL'
+  role_id: number
+  role?: Role
   name: string
+  photo_url: string | null
   display_order: number
   active: boolean
 }
@@ -16,8 +25,10 @@ export type Candidate = {
 export type Vote = {
   id: number
   booth: number
-  spl: string
-  aspl: string
+  role_id: number
+  role_name: string
+  candidate_name: string
+  session_id: string     // groups all role votes from one voter together
   created_at: string
 }
 

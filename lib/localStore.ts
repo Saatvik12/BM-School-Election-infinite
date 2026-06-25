@@ -1,15 +1,14 @@
-// Local storage keys
 const key = (booth: number, suffix: string) => `bmis_booth${booth}_${suffix}`
 
 export type LocalVote = {
   id: string
-  spl: string
-  aspl: string
+  session_id: string
+  role_id: number
+  role_name: string
+  candidate_name: string
   timestamp: string
   synced: boolean
 }
-
-// ── Vote storage ─────────────────────────────────────────
 
 export function getLocalVotes(booth: number): LocalVote[] {
   try {
@@ -41,18 +40,33 @@ export function getUnsyncedVotes(booth: number): LocalVote[] {
 }
 
 export function getLocalVoteCount(booth: number): number {
-  return getLocalVotes(booth).length
+  // Count unique sessions (each session = one full voter)
+  const votes = getLocalVotes(booth)
+  const sessions = new Set(votes.map(v => v.session_id))
+  return sessions.size
 }
 
 export function getSyncedVoteCount(booth: number): number {
-  return getLocalVotes(booth).filter(v => v.synced).length
+  const votes = getLocalVotes(booth)
+  const syncedSessions = new Set(votes.filter(v => v.synced).map(v => v.session_id))
+  return syncedSessions.size
 }
 
 export function getUnsyncedVoteCount(booth: number): number {
-  return getLocalVotes(booth).filter(v => !v.synced).length
+  const unsynced = getUnsyncedVotes(booth)
+  const unsyncedSessions = new Set(unsynced.map(v => v.session_id))
+  return unsyncedSessions.size
 }
 
-// ── Sync setting ─────────────────────────────────────────
+export function getLocalTallies(booth: number): Record<string, Record<string, number>> {
+  const votes = getLocalVotes(booth)
+  const tallies: Record<string, Record<string, number>> = {}
+  votes.forEach(v => {
+    if (!tallies[v.role_name]) tallies[v.role_name] = {}
+    tallies[v.role_name][v.candidate_name] = (tallies[v.role_name][v.candidate_name] || 0) + 1
+  })
+  return tallies
+}
 
 export function getSyncEnabled(booth: number): boolean {
   try {
@@ -63,17 +77,4 @@ export function getSyncEnabled(booth: number): boolean {
 
 export function setSyncEnabled(booth: number, enabled: boolean) {
   localStorage.setItem(key(booth, 'sync'), String(enabled))
-}
-
-// ── SPL/ASPL tallies (derived from local votes) ──────────
-
-export function getLocalTallies(booth: number) {
-  const votes = getLocalVotes(booth)
-  const spl: Record<string, number> = {}
-  const aspl: Record<string, number> = {}
-  votes.forEach(v => {
-    spl[v.spl] = (spl[v.spl] || 0) + 1
-    aspl[v.aspl] = (aspl[v.aspl] || 0) + 1
-  })
-  return { spl, aspl, total: votes.length }
 }
