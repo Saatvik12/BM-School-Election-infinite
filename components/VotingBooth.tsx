@@ -230,6 +230,8 @@ export default function VotingBooth() {
   const [submitting, setSubmitting] = useState(false)
   const [localCount, setLocalCount] = useState(0)
   const [syncEnabled, setSyncEnabledState] = useState(true)
+  const [allRoles, setAllRoles] = useState<Role[]>([])
+  const [adminPassword, setAdminPassword] = useState('')
   const [showSettingsPrompt, setShowSettingsPrompt] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
   const [settingsPassword, setSettingsPassword] = useState('')
@@ -247,19 +249,21 @@ export default function VotingBooth() {
     const [rolesRes, candidatesRes, settingsRes, boothRolesRes] = await Promise.all([
       supabase.from('roles').select('*').eq('active', true).order('display_order'),
       supabase.from('candidates').select('*').eq('active', true).order('display_order'),
-      supabase.from('election_settings').select('voting_open').single(),
+      supabase.from('election_settings').select('voting_open, admin_password').single(),
       supabase.from('booth_roles').select('role_id').eq('booth', booth),
     ])
     if (rolesRes.data) {
-      const allRoles: Role[] = rolesRes.data
+      const allRolesData: Role[] = rolesRes.data
+      setAllRoles(allRolesData)
       // Filter to assigned roles; if none assigned, use all
       const assignedIds = boothRolesRes.data?.map((r: any) => r.role_id) ?? []
-      const filtered = assignedIds.length > 0 ? allRoles.filter(r => assignedIds.includes(r.id)) : allRoles
+      const filtered = assignedIds.length > 0 ? allRolesData.filter(r => assignedIds.includes(r.id)) : allRolesData
       setRoles(filtered)
     }
     if (candidatesRes.data) setCandidates(candidatesRes.data)
     if (settingsRes.data) {
       setElectionOpen(settingsRes.data.voting_open)
+      if (settingsRes.data.admin_password) setAdminPassword(settingsRes.data.admin_password)
       if (!settingsRes.data.voting_open) setStep('closed')
     }
   }, [booth])
@@ -376,10 +380,10 @@ export default function VotingBooth() {
   }
 
   const handleSettingsSubmit = () => {
-    if (settingsPassword === PASSWORD) {
+    if (settingsPassword === adminPassword) {
       setShowSettingsPrompt(false); setShowSettings(true)
       setSettingsPassword(''); setSettingsError('')
-    } else { setSettingsError('Incorrect password.') }
+    } else { setSettingsError('Incorrect admin password.') }
   }
 
   // ── SCREENS ──────────────────────────────────────────────
@@ -429,7 +433,7 @@ export default function VotingBooth() {
 
   return (
     <div style={{ minHeight: '100vh', background: 'linear-gradient(135deg, #f8f9fc 0%, #eef2ff 100%)', display: 'flex', flexDirection: 'column' }}>
-      {showSettings && <BoothSettings booth={booth} roles={activeRoles} allRoles={roles} onClose={() => { setShowSettings(false); refreshLocal(); loadData() }} />}
+      {showSettings && <BoothSettings booth={booth} roles={activeRoles} allRoles={allRoles} onClose={() => { setShowSettings(false); refreshLocal(); loadData() }} />}
 
       {showSettingsPrompt && (
         <div style={{ position: 'fixed', inset: 0, zIndex: 100, background: 'rgba(15,23,42,0.6)', backdropFilter: 'blur(4px)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '24px' }}>
