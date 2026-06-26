@@ -16,7 +16,7 @@ type AuthContextType = {
 }
 
 const AuthContext = createContext<AuthContextType | null>(null)
-const VALID_PASSWORD = 'BMIS1815$$#'
+const VALID_PASSWORD = 'BMIS1815'
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [session, setSession] = useState<Session | null>(null)
