@@ -7,7 +7,7 @@ export const supabase = createClient(supabaseUrl, supabaseAnonKey)
 
 export type Role = {
   id: number
-  name: string           // e.g. "SPL", "ASPL", "House Captain"
+  name: string
   display_order: number
   active: boolean
 }
@@ -28,7 +28,7 @@ export type Vote = {
   role_id: number
   role_name: string
   candidate_name: string
-  session_id: string     // groups all role votes from one voter together
+  session_id: string
   created_at: string
 }
 
@@ -37,7 +37,16 @@ export type BoothStatus = {
   last_seen: string
 }
 
+export type BoothRole = {
+  id: number
+  booth: number
+  role_id: number
+}
+
 export type ElectionSettings = {
   id: number
   voting_open: boolean
+  booth_count: number
+  admin_password: string
+  booth_password: string
 }

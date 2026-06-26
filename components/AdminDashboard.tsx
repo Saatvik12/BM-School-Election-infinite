@@ -2,10 +2,9 @@
 
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { useAuth } from '@/lib/auth'
-import { supabase, Vote, BoothStatus, Candidate, Role } from '@/lib/supabase'
+import { supabase, Vote, BoothStatus, Candidate, Role, BoothRole } from '@/lib/supabase'
 
 type Tab = 'results' | 'booths' | 'candidates' | 'settings'
-const PASSWORD = 'BMIS1815$$#'
 
 export default function AdminDashboard() {
   const { logout } = useAuth()
@@ -14,6 +13,7 @@ export default function AdminDashboard() {
   const [roles, setRoles] = useState<Role[]>([])
   const [candidates, setCandidates] = useState<Candidate[]>([])
   const [boothStatuses, setBoothStatuses] = useState<BoothStatus[]>([])
+  const [boothRoles, setBoothRoles] = useState<BoothRole[]>([])
   const [electionOpen, setElectionOpen] = useState(false)
   const [boothCount, setBoothCount] = useState(6)
   const [savingBoothCount, setSavingBoothCount] = useState(false)
@@ -25,17 +25,19 @@ export default function AdminDashboard() {
   const [resetting, setResetting] = useState(false)
 
   const loadAll = useCallback(async () => {
-    const [votesRes, rolesRes, candidatesRes, boothRes, settingsRes] = await Promise.all([
+    const [votesRes, rolesRes, candidatesRes, boothRes, settingsRes, boothRolesRes] = await Promise.all([
       supabase.from('votes').select('*').order('created_at'),
       supabase.from('roles').select('*').order('display_order'),
       supabase.from('candidates').select('*').order('display_order'),
       supabase.from('booth_status').select('*'),
       supabase.from('election_settings').select('*').single(),
+      supabase.from('booth_roles').select('*'),
     ])
     if (votesRes.data) setVotes(votesRes.data)
     if (rolesRes.data) setRoles(rolesRes.data)
     if (candidatesRes.data) setCandidates(candidatesRes.data)
     if (boothRes.data) setBoothStatuses(boothRes.data)
+    if (boothRolesRes.data) setBoothRoles(boothRolesRes.data)
     if (settingsRes.data) {
       setElectionOpen(settingsRes.data.voting_open)
       setBoothCount(settingsRes.data.booth_count ?? 6)
@@ -47,9 +49,13 @@ export default function AdminDashboard() {
     const channel = supabase.channel('admin-realtime')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'votes' }, loadAll)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'booth_status' }, loadAll)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'election_settings' }, (p: any) => setElectionOpen(p.new.voting_open))
+      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'election_settings' }, (p: any) => {
+        setElectionOpen(p.new.voting_open)
+        setBoothCount(p.new.booth_count ?? 6)
+      })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'candidates' }, loadAll)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'roles' }, loadAll)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'booth_roles' }, loadAll)
       .subscribe()
     return () => { supabase.removeChannel(channel) }
   }, [loadAll])
@@ -63,33 +69,32 @@ export default function AdminDashboard() {
     setTogglingElection(false)
   }
 
+  const handleSaveBoothCount = async () => {
+    setSavingBoothCount(true)
+    await supabase.from('election_settings').update({ booth_count: boothCount }).eq('id', 1)
+    setSavingBoothCount(false)
+  }
+
   const handleExportCSV = () => {
-    // Group by session
     const sessions: Record<string, Vote[]> = {}
     votes.forEach(v => {
       if (!sessions[v.session_id]) sessions[v.session_id] = []
       sessions[v.session_id].push(v)
     })
     const roleNames = roles.filter(r => r.active).sort((a,b) => a.display_order - b.display_order).map(r => r.name)
-    const headers = ['Timestamp', 'Booth', ...roleNames]
-    const rows = [headers]
-    Object.values(sessions).forEach(sessionVotes => {
-      const first = sessionVotes[0]
+    const rows = [['Timestamp', 'Booth', ...roleNames]]
+    Object.values(sessions).forEach(sv => {
+      const first = sv[0]
       const t = new Date(first.created_at)
       const ts = `${t.getHours().toString().padStart(2,'0')}:${t.getMinutes().toString().padStart(2,'0')}`
       const row: string[] = [ts, String(first.booth)]
-      roleNames.forEach(rn => {
-        const v = sessionVotes.find(v => v.role_name === rn)
-        row.push(v ? v.candidate_name : '-')
-      })
+      roleNames.forEach(rn => { const v = sv.find(v => v.role_name === rn); row.push(v ? v.candidate_name : '-') })
       rows.push(row)
     })
     const csv = rows.map(r => r.map(c => `"${c}"`).join(',')).join('\n')
     const blob = new Blob([csv], { type: 'text/csv' })
     const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url; a.download = `election-results-${Date.now()}.csv`
-    a.click(); URL.revokeObjectURL(url)
+    const a = document.createElement('a'); a.href = url; a.download = `election-results-${Date.now()}.csv`; a.click(); URL.revokeObjectURL(url)
   }
 
   const handleReset = async () => {
@@ -99,20 +104,27 @@ export default function AdminDashboard() {
       setResetError(''); setResetStep(2); return
     }
     if (resetStep === 2) {
-      if (resetPassword !== PASSWORD) { setResetError('Incorrect password.'); return }
+      const { data: settings } = await supabase.from('election_settings').select('admin_password').single()
+      const adminPw = settings?.admin_password ?? 'BMIS1815$$#'
+      if (resetPassword !== adminPw) { setResetError('Incorrect password.'); return }
       setResetting(true)
-      const { error: deleteError } = await supabase.from('votes').delete().gt('id', 0)
-      if (deleteError) { setResetError('Delete failed: ' + deleteError.message); setResetting(false); return }
+      const { error } = await supabase.from('votes').delete().gt('id', 0)
+      if (error) { setResetError('Delete failed: ' + error.message); setResetting(false); return }
       setVotes([])
       setResetStep(0); setResetConfirmText(''); setResetPassword(''); setResetError('')
       setResetting(false)
     }
   }
 
-  const cancelReset = () => { setResetStep(0); setResetConfirmText(''); setResetPassword(''); setResetError('') }
-
-  // Unique voters = unique session_ids
   const uniqueSessions = new Set(votes.map(v => v.session_id)).size
+  const activeRoles = roles.filter(r => r.active).sort((a,b) => a.display_order - b.display_order)
+  const booths = Array.from({ length: boothCount }, (_, i) => i + 1)
+
+  // Get roles for a specific booth (empty = all roles)
+  const getBoothRoles = (booth: number): number[] => {
+    const assigned = boothRoles.filter(br => br.booth === booth).map(br => br.role_id)
+    return assigned.length > 0 ? assigned : activeRoles.map(r => r.id)
+  }
 
   return (
     <div style={{ minHeight: '100vh', background: 'var(--background)' }}>
@@ -140,8 +152,8 @@ export default function AdminDashboard() {
         {/* Stats */}
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: '16px', marginBottom: '32px' }}>
           <StatCard label="Total Voters" value={uniqueSessions} icon="🗳️" />
-          <StatCard label="Total Vote Records" value={votes.length} icon="📋" />
-          <StatCard label="Active Roles" value={roles.filter(r => r.active).length} icon="🏷️" />
+          <StatCard label="Vote Records" value={votes.length} icon="📋" />
+          <StatCard label="Active Roles" value={activeRoles.length} icon="🏷️" />
           <StatCard label="Active Booths" value={boothStatuses.filter(isBoothActive).length} icon="🖥️" />
         </div>
 
@@ -154,16 +166,14 @@ export default function AdminDashboard() {
           ))}
         </div>
 
-        {/* RESULTS TAB */}
+        {/* ── RESULTS TAB ── */}
         {tab === 'results' && (
           <div className="animate-fadeIn">
-            {roles.filter(r => r.active).sort((a,b) => a.display_order - b.display_order).map(role => {
+            {activeRoles.map(role => {
               const roleCandidates = candidates.filter(c => c.role_id === role.id && c.active)
               const counts: Record<string, number> = {}
               roleCandidates.forEach(c => { counts[c.name] = 0 })
-              votes.filter(v => v.role_id === role.id).forEach(v => {
-                counts[v.candidate_name] = (counts[v.candidate_name] || 0) + 1
-              })
+              votes.filter(v => v.role_id === role.id).forEach(v => { counts[v.candidate_name] = (counts[v.candidate_name] || 0) + 1 })
               const max = Math.max(...Object.values(counts), 1)
               const total = Object.values(counts).reduce((a,b) => a+b, 0)
               return (
@@ -180,7 +190,6 @@ export default function AdminDashboard() {
                       </div>
                     </div>
                   ))}
-                  {/* Booth breakdown */}
                   <details style={{ marginTop: '16px' }}>
                     <summary style={{ fontSize: '13px', color: 'var(--muted)', cursor: 'pointer', fontWeight: '600' }}>Booth-wise breakdown</summary>
                     <div style={{ marginTop: '12px', overflowX: 'auto' }}>
@@ -188,18 +197,18 @@ export default function AdminDashboard() {
                         <thead>
                           <tr style={{ borderBottom: '2px solid var(--border)' }}>
                             <th style={{ textAlign: 'left', padding: '6px 8px', color: 'var(--muted)', fontWeight: '700' }}>Candidate</th>
-                            {Array.from({length: boothCount}, (_,i) => i+1).map(b => <th key={b} style={{ textAlign: 'center', padding: '6px 8px', color: 'var(--muted)', fontWeight: '700' }}>B{b}</th>)}
+                            {booths.map(b => <th key={b} style={{ textAlign: 'center', padding: '6px 8px', color: 'var(--muted)', fontWeight: '700' }}>B{b}</th>)}
                             <th style={{ textAlign: 'center', padding: '6px 8px', color: 'var(--foreground)', fontWeight: '700' }}>Total</th>
                           </tr>
                         </thead>
                         <tbody>
                           {Object.keys(counts).sort().map(cand => {
-                            const boothCounts = Array.from({length: boothCount}, (_,i) => i+1).map(b => votes.filter(v => v.role_id === role.id && v.candidate_name === cand && v.booth === b).length)
+                            const bc = booths.map(b => votes.filter(v => v.role_id === role.id && v.candidate_name === cand && v.booth === b).length)
                             return (
                               <tr key={cand} style={{ borderBottom: '1px solid var(--border)' }}>
                                 <td style={{ padding: '8px', fontWeight: '600' }}>{cand}</td>
-                                {boothCounts.map((c,i) => <td key={i} style={{ textAlign: 'center', padding: '8px', color: c ? 'var(--foreground)' : 'var(--muted)' }}>{c}</td>)}
-                                <td style={{ textAlign: 'center', padding: '8px', fontWeight: '700', color: 'var(--accent)' }}>{boothCounts.reduce((a,b)=>a+b,0)}</td>
+                                {bc.map((c,i) => <td key={i} style={{ textAlign: 'center', padding: '8px', color: c ? 'var(--foreground)' : 'var(--muted)' }}>{c}</td>)}
+                                <td style={{ textAlign: 'center', padding: '8px', fontWeight: '700', color: 'var(--accent)' }}>{bc.reduce((a,b)=>a+b,0)}</td>
                               </tr>
                             )
                           })}
@@ -210,39 +219,66 @@ export default function AdminDashboard() {
                 </div>
               )
             })}
-            {roles.filter(r => r.active).length === 0 && (
-              <div className="card" style={{ padding: '40px', textAlign: 'center', color: 'var(--muted)' }}>No active roles yet. Add them in the Candidates tab.</div>
-            )}
+            {activeRoles.length === 0 && <div className="card" style={{ padding: '40px', textAlign: 'center', color: 'var(--muted)' }}>No active roles yet. Add them in the Candidates tab.</div>}
           </div>
         )}
 
-        {/* BOOTHS TAB */}
+        {/* ── BOOTHS TAB ── */}
         {tab === 'booths' && (
-          <div className="animate-fadeIn">
+          <div className="animate-fadeIn" style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
+
+            {/* Booth count selector */}
             <div className="card" style={{ padding: '24px' }}>
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '24px' }}>
-                <h3 style={{ fontWeight: '700', fontSize: '16px' }}>Booth Heartbeat Monitor</h3>
+              <h3 style={{ fontWeight: '700', fontSize: '16px', marginBottom: '6px' }}>Number of Voting Booths</h3>
+              <p style={{ color: 'var(--muted)', fontSize: '14px', marginBottom: '16px' }}>Controls how many booths can log in (VotingBooth1 through VotingBooth{boothCount}).</p>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                {[1,2,3,4,5,6,7,8,9,10].map(n => (
+                  <button key={n} onClick={() => setBoothCount(n)} style={{ width: '40px', height: '40px', borderRadius: '8px', border: `2px solid ${boothCount === n ? 'var(--accent)' : 'var(--border)'}`, background: boothCount === n ? 'var(--accent)' : 'transparent', color: boothCount === n ? 'white' : 'var(--foreground)', fontWeight: '700', cursor: 'pointer', fontSize: '15px', transition: 'all 0.15s ease' }}>
+                    {n}
+                  </button>
+                ))}
+              </div>
+              <button className="btn-primary" onClick={handleSaveBoothCount} disabled={savingBoothCount} style={{ marginTop: '16px', padding: '10px 20px', fontSize: '14px' }}>
+                {savingBoothCount ? 'Saving...' : 'Save'}
+              </button>
+            </div>
+
+            {/* Booth cards with role assignment */}
+            <div className="card" style={{ padding: '24px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '20px' }}>
+                <h3 style={{ fontWeight: '700', fontSize: '16px' }}>Booth Status & Role Assignment</h3>
                 <button className="btn-ghost" onClick={loadAll} style={{ padding: '8px 16px', fontSize: '13px' }}>↻ Refresh</button>
               </div>
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: '12px' }}>
-                {Array.from({length: boothCount}, (_,i) => i+1).map(n => {
-                  const booth = boothStatuses.find(b => b.booth === n)
-                  const active = booth && isBoothActive(booth)
-                  const lastSeen = booth ? new Date(booth.last_seen) : null
-                  const boothVotes = new Set(votes.filter(v => v.booth === n).map(v => v.session_id)).size
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))', gap: '12px' }}>
+                {booths.map(n => {
+                  const status = boothStatuses.find(b => b.booth === n)
+                  const active = status && isBoothActive(status)
+                  const lastSeen = status ? new Date(status.last_seen) : null
+                  const boothVoters = new Set(votes.filter(v => v.booth === n).map(v => v.session_id)).size
+                  const assignedRoleIds = boothRoles.filter(br => br.booth === n).map(br => br.role_id)
+                  const votesAllRoles = assignedRoleIds.length === 0
+
                   return (
-                    <div key={n} className="card" style={{ padding: '20px', borderColor: active ? 'var(--success)' : 'var(--border)' }}>
-                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '12px' }}>
-                        <span style={{ fontWeight: '700', fontSize: '15px' }}>Booth {n}</span>
-                        <span style={{ fontSize: '18px' }}>{active ? '❤️' : '⚠️'}</span>
-                      </div>
-                      <div style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', background: active ? 'var(--success-light)' : '#f1f5f9', color: active ? 'var(--success)' : 'var(--muted)', padding: '4px 10px', borderRadius: '20px', fontSize: '12px', fontWeight: '600' }}>
-                        <div className={`status-dot ${active ? 'active' : 'offline'}`} />
-                        {active ? 'Active' : booth ? 'Offline' : 'Not Connected'}
-                      </div>
-                      {lastSeen && <div style={{ marginTop: '10px', fontSize: '12px', color: 'var(--muted)' }}>Last seen: {lastSeen.toLocaleTimeString()}</div>}
-                      <div style={{ marginTop: '8px', fontSize: '13px', color: 'var(--muted)', fontWeight: '500' }}>{boothVotes} voter{boothVotes !== 1 ? 's' : ''}</div>
-                    </div>
+                    <BoothCard
+                      key={n}
+                      booth={n}
+                      active={!!active}
+                      lastSeen={lastSeen}
+                      voters={boothVoters}
+                      allRoles={activeRoles}
+                      assignedRoleIds={assignedRoleIds}
+                      votesAllRoles={votesAllRoles}
+                      onSave={async (selectedIds) => {
+                        // Delete existing assignments for this booth
+                        await supabase.from('booth_roles').delete().eq('booth', n)
+                        // If not all roles selected, insert specific ones
+                        if (selectedIds.length !== activeRoles.length) {
+                          const rows = selectedIds.map(rid => ({ booth: n, role_id: rid }))
+                          if (rows.length > 0) await supabase.from('booth_roles').insert(rows)
+                        }
+                        loadAll()
+                      }}
+                    />
                   )
                 })}
               </div>
@@ -250,31 +286,16 @@ export default function AdminDashboard() {
           </div>
         )}
 
-        {/* CANDIDATES TAB */}
+        {/* ── CANDIDATES TAB ── */}
         {tab === 'candidates' && (
           <CandidatesTab roles={roles} candidates={candidates} onRefresh={loadAll} />
         )}
 
-        {/* SETTINGS TAB */}
+        {/* ── SETTINGS TAB ── */}
         {tab === 'settings' && (
           <div className="animate-fadeIn" style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
-            <div className="card" style={{ padding: '24px' }}>
-              <h3 style={{ fontWeight: '700', fontSize: '16px', marginBottom: '6px' }}>Number of Voting Booths</h3>
-              <p style={{ color: 'var(--muted)', fontSize: '14px', marginBottom: '16px' }}>
-                Controls how many booths can log in (VotingBooth1 through VotingBooth{boothCount}).
-              </p>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-                {[1,2,3,4,5,6,7,8,9,10].map(n => (
-                  <button key={n} onClick={() => setBoothCount(n)} style={{ width: '40px', height: '40px', borderRadius: '8px', border: `2px solid ${boothCount === n ? 'var(--accent)' : 'var(--border)'}`, background: boothCount === n ? 'var(--accent)' : 'transparent', color: boothCount === n ? 'white' : 'var(--foreground)', fontWeight: '700', cursor: 'pointer', fontSize: '15px', transition: 'all 0.15s ease' }}>
-                    {n}
-                  </button>
-                ))}
-              </div>
-              <button className="btn-primary" onClick={async () => { setSavingBoothCount(true); await supabase.from('election_settings').update({ booth_count: boothCount }).eq('id', 1); setSavingBoothCount(false) }} disabled={savingBoothCount} style={{ marginTop: '16px', padding: '10px 20px', fontSize: '14px' }}>
-                {savingBoothCount ? 'Saving...' : 'Save Booth Count'}
-              </button>
-            </div>
 
+            {/* Election toggle */}
             <div className="card" style={{ padding: '24px' }}>
               <h3 style={{ fontWeight: '700', fontSize: '16px', marginBottom: '6px' }}>Election Status</h3>
               <p style={{ color: 'var(--muted)', fontSize: '14px', marginBottom: '20px' }}>Opening or closing affects all booths immediately.</p>
@@ -283,18 +304,21 @@ export default function AdminDashboard() {
               </button>
             </div>
 
+            {/* Change passwords */}
+            <ChangePasswordCard />
+
+            {/* Export */}
             <div className="card" style={{ padding: '24px' }}>
               <h3 style={{ fontWeight: '700', fontSize: '16px', marginBottom: '6px' }}>Export Data</h3>
               <p style={{ color: 'var(--muted)', fontSize: '14px', marginBottom: '20px' }}>Download all {uniqueSessions} voter records as CSV.</p>
               <button className="btn-primary" onClick={handleExportCSV} disabled={votes.length === 0}>📥 Export CSV</button>
             </div>
 
+            {/* Reset */}
             <div className="card" style={{ padding: '24px', borderColor: resetStep > 0 ? 'var(--danger)' : 'var(--border)' }}>
               <h3 style={{ fontWeight: '700', fontSize: '16px', marginBottom: '6px', color: 'var(--danger)' }}>Reset Votes</h3>
               <p style={{ color: 'var(--muted)', fontSize: '14px', marginBottom: '20px' }}>Permanently deletes all vote records from the database.</p>
-              {resetStep === 0 && (
-                <button onClick={handleReset} style={{ padding: '10px 20px', borderRadius: '10px', border: '2px solid var(--danger)', background: 'transparent', color: 'var(--danger)', fontWeight: '600', cursor: 'pointer', fontSize: '14px' }}>Reset All Votes</button>
-              )}
+              {resetStep === 0 && <button onClick={handleReset} style={{ padding: '10px 20px', borderRadius: '10px', border: '2px solid var(--danger)', background: 'transparent', color: 'var(--danger)', fontWeight: '600', cursor: 'pointer', fontSize: '14px' }}>Reset All Votes</button>}
               {resetStep === 1 && (
                 <div>
                   <p style={{ fontWeight: '600', fontSize: '14px', marginBottom: '12px' }}>Type <strong>RESET</strong> to confirm:</p>
@@ -302,7 +326,7 @@ export default function AdminDashboard() {
                   {resetError && <p style={{ color: 'var(--danger)', fontSize: '13px', marginBottom: '12px' }}>{resetError}</p>}
                   <div style={{ display: 'flex', gap: '10px' }}>
                     <button onClick={handleReset} style={{ padding: '10px 20px', borderRadius: '10px', border: 'none', background: 'var(--danger)', color: 'white', fontWeight: '600', cursor: 'pointer' }}>Continue</button>
-                    <button className="btn-ghost" onClick={cancelReset}>Cancel</button>
+                    <button className="btn-ghost" onClick={() => { setResetStep(0); setResetConfirmText(''); setResetError('') }}>Cancel</button>
                   </div>
                 </div>
               )}
@@ -315,13 +339,170 @@ export default function AdminDashboard() {
                     <button onClick={handleReset} disabled={resetting} style={{ padding: '10px 20px', borderRadius: '10px', border: 'none', background: 'var(--danger)', color: 'white', fontWeight: '600', cursor: 'pointer', opacity: resetting ? 0.6 : 1 }}>
                       {resetting ? 'Deleting...' : '⚠️ Delete All Votes'}
                     </button>
-                    <button className="btn-ghost" onClick={cancelReset}>Cancel</button>
+                    <button className="btn-ghost" onClick={() => { setResetStep(0); setResetPassword(''); setResetError('') }}>Cancel</button>
                   </div>
                 </div>
               )}
             </div>
           </div>
         )}
+      </div>
+    </div>
+  )
+}
+
+// ── Booth Card with role assignment ──────────────────────
+
+function BoothCard({ booth, active, lastSeen, voters, allRoles, assignedRoleIds, votesAllRoles, onSave }: {
+  booth: number; active: boolean; lastSeen: Date | null; voters: number
+  allRoles: Role[]; assignedRoleIds: number[]; votesAllRoles: boolean
+  onSave: (selectedIds: number[]) => Promise<void>
+}) {
+  const [expanded, setExpanded] = useState(false)
+  const [selected, setSelected] = useState<number[]>(votesAllRoles ? allRoles.map(r => r.id) : assignedRoleIds)
+  const [saving, setSaving] = useState(false)
+
+  useEffect(() => {
+    setSelected(votesAllRoles ? allRoles.map(r => r.id) : assignedRoleIds)
+  }, [assignedRoleIds, votesAllRoles, allRoles])
+
+  const toggleRole = (id: number) => {
+    setSelected(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id])
+  }
+
+  const handleSave = async () => {
+    setSaving(true)
+    await onSave(selected)
+    setSaving(false)
+    setExpanded(false)
+  }
+
+  const displayRoles = votesAllRoles ? allRoles : allRoles.filter(r => assignedRoleIds.includes(r.id))
+
+  return (
+    <div style={{ border: `2px solid ${active ? 'var(--success)' : 'var(--border)'}`, borderRadius: '14px', overflow: 'hidden', background: 'white' }}>
+      <div style={{ padding: '16px 20px' }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '10px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <span style={{ fontWeight: '700', fontSize: '15px' }}>Booth {booth}</span>
+            <span style={{ fontSize: '16px' }}>{active ? '❤️' : '⚠️'}</span>
+          </div>
+          <button onClick={() => setExpanded(!expanded)} style={{ padding: '5px 12px', borderRadius: '6px', border: '1px solid var(--border)', background: 'transparent', cursor: 'pointer', fontSize: '12px', fontWeight: '600', color: 'var(--muted)' }}>
+            {expanded ? 'Close' : '✏️ Edit Roles'}
+          </button>
+        </div>
+        <div style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', background: active ? 'var(--success-light)' : '#f1f5f9', color: active ? 'var(--success)' : 'var(--muted)', padding: '3px 10px', borderRadius: '20px', fontSize: '12px', fontWeight: '600', marginBottom: '8px' }}>
+          <div style={{ width: '6px', height: '6px', borderRadius: '50%', background: active ? 'var(--success)' : '#94a3b8' }} />
+          {active ? 'Active' : lastSeen ? 'Offline' : 'Not Connected'}
+        </div>
+        {lastSeen && <div style={{ fontSize: '11px', color: 'var(--muted)', marginBottom: '6px' }}>Last seen: {lastSeen.toLocaleTimeString()}</div>}
+        <div style={{ fontSize: '13px', color: 'var(--muted)', marginBottom: '10px' }}>{voters} voter{voters !== 1 ? 's' : ''}</div>
+
+        {/* Role tags */}
+        <div style={{ display: 'flex', gap: '4px', flexWrap: 'wrap' }}>
+          {votesAllRoles
+            ? <span style={{ fontSize: '11px', background: 'var(--accent-light)', color: 'var(--accent)', padding: '2px 8px', borderRadius: '20px', fontWeight: '600' }}>All roles</span>
+            : displayRoles.map(r => <span key={r.id} style={{ fontSize: '11px', background: 'var(--accent-light)', color: 'var(--accent)', padding: '2px 8px', borderRadius: '20px', fontWeight: '600' }}>{r.name}</span>)
+          }
+        </div>
+      </div>
+
+      {/* Role assignment panel */}
+      {expanded && (
+        <div style={{ borderTop: '1px solid var(--border)', padding: '16px 20px', background: '#fafafa' }}>
+          <p style={{ fontSize: '13px', fontWeight: '600', marginBottom: '10px', color: 'var(--foreground)' }}>Select roles this booth votes for:</p>
+          {allRoles.length === 0 && <p style={{ fontSize: '13px', color: 'var(--muted)' }}>No roles created yet.</p>}
+          {allRoles.map(role => (
+            <label key={role.id} style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '8px', cursor: 'pointer' }}>
+              <input type="checkbox" checked={selected.includes(role.id)} onChange={() => toggleRole(role.id)} style={{ accentColor: 'var(--accent)', width: '16px', height: '16px' }} />
+              <span style={{ fontSize: '14px', fontWeight: '500' }}>{role.name}</span>
+            </label>
+          ))}
+          <p style={{ fontSize: '11px', color: 'var(--muted)', marginBottom: '12px' }}>Select all to make this booth vote for everything.</p>
+          <div style={{ display: 'flex', gap: '8px' }}>
+            <button className="btn-primary" onClick={handleSave} disabled={saving || selected.length === 0} style={{ padding: '8px 16px', fontSize: '13px' }}>
+              {saving ? 'Saving...' : 'Save'}
+            </button>
+            <button className="btn-ghost" onClick={() => setExpanded(false)} style={{ padding: '8px 14px', fontSize: '13px' }}>Cancel</button>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ── Change Password Card ──────────────────────────────────
+
+function ChangePasswordCard() {
+  const [adminCurrent, setAdminCurrent] = useState('')
+  const [adminNew, setAdminNew] = useState('')
+  const [adminConfirm, setAdminConfirm] = useState('')
+  const [adminMsg, setAdminMsg] = useState('')
+  const [adminError, setAdminError] = useState('')
+  const [savingAdmin, setSavingAdmin] = useState(false)
+
+  const [boothNew, setBoothNew] = useState('')
+  const [boothConfirm, setBoothConfirm] = useState('')
+  const [boothAdminPw, setBoothAdminPw] = useState('')
+  const [boothMsg, setBoothMsg] = useState('')
+  const [boothError, setBoothError] = useState('')
+  const [savingBooth, setSavingBooth] = useState(false)
+
+  const handleChangeAdmin = async () => {
+    setAdminError(''); setAdminMsg('')
+    if (adminNew !== adminConfirm) { setAdminError('New passwords do not match.'); return }
+    if (adminNew.length < 6) { setAdminError('Password must be at least 6 characters.'); return }
+    setSavingAdmin(true)
+    const { data } = await supabase.from('election_settings').select('admin_password').single()
+    if (data?.admin_password !== adminCurrent) { setAdminError('Current password is incorrect.'); setSavingAdmin(false); return }
+    await supabase.from('election_settings').update({ admin_password: adminNew }).eq('id', 1)
+    setAdminMsg('✓ Admin password updated.'); setAdminCurrent(''); setAdminNew(''); setAdminConfirm('')
+    setSavingAdmin(false)
+  }
+
+  const handleChangeBooth = async () => {
+    setBoothError(''); setBoothMsg('')
+    if (boothNew !== boothConfirm) { setBoothError('New passwords do not match.'); return }
+    if (boothNew.length < 6) { setBoothError('Password must be at least 6 characters.'); return }
+    setSavingBooth(true)
+    const { data } = await supabase.from('election_settings').select('admin_password').single()
+    if (data?.admin_password !== boothAdminPw) { setBoothError('Admin password is incorrect.'); setSavingBooth(false); return }
+    await supabase.from('election_settings').update({ booth_password: boothNew }).eq('id', 1)
+    setBoothMsg('✓ Booth password updated.'); setBoothNew(''); setBoothConfirm(''); setBoothAdminPw('')
+    setSavingBooth(false)
+  }
+
+  return (
+    <div className="card" style={{ padding: '24px' }}>
+      <h3 style={{ fontWeight: '700', fontSize: '16px', marginBottom: '20px' }}>Change Passwords</h3>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '24px' }}>
+
+        {/* Admin password */}
+        <div>
+          <p style={{ fontWeight: '700', fontSize: '14px', marginBottom: '12px', color: 'var(--foreground)' }}>🔐 Admin Password</p>
+          <input type="password" value={adminCurrent} onChange={e => setAdminCurrent(e.target.value)} placeholder="Current admin password" style={{ marginBottom: '8px' }} />
+          <input type="password" value={adminNew} onChange={e => setAdminNew(e.target.value)} placeholder="New password" style={{ marginBottom: '8px' }} />
+          <input type="password" value={adminConfirm} onChange={e => setAdminConfirm(e.target.value)} placeholder="Confirm new password" style={{ marginBottom: '12px' }} />
+          {adminError && <p style={{ color: 'var(--danger)', fontSize: '13px', marginBottom: '8px' }}>{adminError}</p>}
+          {adminMsg && <p style={{ color: 'var(--success)', fontSize: '13px', marginBottom: '8px' }}>{adminMsg}</p>}
+          <button className="btn-primary" onClick={handleChangeAdmin} disabled={savingAdmin} style={{ padding: '10px 18px', fontSize: '13px' }}>
+            {savingAdmin ? 'Saving...' : 'Update Admin Password'}
+          </button>
+        </div>
+
+        {/* Booth password */}
+        <div>
+          <p style={{ fontWeight: '700', fontSize: '14px', marginBottom: '12px', color: 'var(--foreground)' }}>🖥️ Booth Password</p>
+          <input type="password" value={boothNew} onChange={e => setBoothNew(e.target.value)} placeholder="New booth password" style={{ marginBottom: '8px' }} />
+          <input type="password" value={boothConfirm} onChange={e => setBoothConfirm(e.target.value)} placeholder="Confirm new password" style={{ marginBottom: '8px' }} />
+          <input type="password" value={boothAdminPw} onChange={e => setBoothAdminPw(e.target.value)} placeholder="Your admin password (to confirm)" style={{ marginBottom: '12px' }} />
+          {boothError && <p style={{ color: 'var(--danger)', fontSize: '13px', marginBottom: '8px' }}>{boothError}</p>}
+          {boothMsg && <p style={{ color: 'var(--success)', fontSize: '13px', marginBottom: '8px' }}>{boothMsg}</p>}
+          <button className="btn-primary" onClick={handleChangeBooth} disabled={savingBooth} style={{ padding: '10px 18px', fontSize: '13px' }}>
+            {savingBooth ? 'Saving...' : 'Update Booth Password'}
+          </button>
+        </div>
+
       </div>
     </div>
   )
@@ -338,8 +519,6 @@ function CandidatesTab({ roles, candidates, onRefresh }: { roles: Role[]; candid
   const [newCandidateName, setNewCandidateName] = useState('')
   const [uploading, setUploading] = useState(false)
   const [saving, setSaving] = useState(false)
-  const fileInputRef = useRef<HTMLInputElement>(null)
-  const editFileInputRef = useRef<HTMLInputElement>(null)
 
   const uploadPhoto = async (file: File, candidateId?: number): Promise<string | null> => {
     const ext = file.name.split('.').pop()
@@ -355,8 +534,7 @@ function CandidatesTab({ roles, candidates, onRefresh }: { roles: Role[]; candid
     setSaving(true)
     const maxOrder = roles.length > 0 ? Math.max(...roles.map(r => r.display_order)) : 0
     await supabase.from('roles').insert({ name: newRoleName.trim(), display_order: maxOrder + 1, active: true })
-    setNewRoleName(''); setAddingRole(false)
-    onRefresh(); setSaving(false)
+    setNewRoleName(''); setAddingRole(false); onRefresh(); setSaving(false)
   }
 
   const handleUpdateRole = async () => {
@@ -375,15 +553,13 @@ function CandidatesTab({ roles, candidates, onRefresh }: { roles: Role[]; candid
 
   const handleAddCandidate = async (file?: File) => {
     if (!newCandidateName.trim() || !addingCandidateForRole) return
-    setSaving(true)
-    setUploading(!!file)
+    setSaving(true); setUploading(!!file)
     const maxOrder = candidates.filter(c => c.role_id === addingCandidateForRole).length
     const { data: newCand } = await supabase.from('candidates').insert({ role_id: addingCandidateForRole, name: newCandidateName.trim(), display_order: maxOrder + 1, active: true, photo_url: null }).select().single()
     let photoUrl = null
     if (file && newCand) { photoUrl = await uploadPhoto(file, newCand.id) }
     if (photoUrl && newCand) { await supabase.from('candidates').update({ photo_url: photoUrl }).eq('id', newCand.id) }
-    setNewCandidateName(''); setAddingCandidateForRole(null)
-    setUploading(false); setSaving(false); onRefresh()
+    setNewCandidateName(''); setAddingCandidateForRole(null); setUploading(false); setSaving(false); onRefresh()
   }
 
   const handleUpdateCandidate = async (file?: File) => {
@@ -402,11 +578,9 @@ function CandidatesTab({ roles, candidates, onRefresh }: { roles: Role[]; candid
   }
 
   const activeRoles = roles.filter(r => r.active).sort((a,b) => a.display_order - b.display_order)
-  const inactiveRoles = roles.filter(r => !r.active)
 
   return (
     <div className="animate-fadeIn">
-      {/* Roles management */}
       <div className="card" style={{ padding: '24px', marginBottom: '20px' }}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '20px' }}>
           <div>
@@ -415,15 +589,13 @@ function CandidatesTab({ roles, candidates, onRefresh }: { roles: Role[]; candid
           </div>
           <button className="btn-primary" onClick={() => setAddingRole(true)} style={{ padding: '8px 16px', fontSize: '13px' }}>+ Add Role</button>
         </div>
-
         {addingRole && (
           <div style={{ background: 'var(--accent-light)', borderRadius: '10px', padding: '16px', marginBottom: '16px', display: 'flex', gap: '10px', alignItems: 'center' }}>
-            <input type="text" value={newRoleName} onChange={e => setNewRoleName(e.target.value)} placeholder="Role name (e.g. House Captain)" onKeyDown={e => e.key === 'Enter' && handleAddRole()} autoFocus style={{ flex: 1 }} />
-            <button className="btn-primary" onClick={handleAddRole} disabled={saving} style={{ padding: '10px 16px', fontSize: '13px' }}>{saving ? 'Saving...' : 'Add'}</button>
+            <input type="text" value={newRoleName} onChange={e => setNewRoleName(e.target.value)} placeholder="Role name" onKeyDown={e => e.key === 'Enter' && handleAddRole()} autoFocus style={{ flex: 1 }} />
+            <button className="btn-primary" onClick={handleAddRole} disabled={saving} style={{ padding: '10px 16px', fontSize: '13px' }}>{saving ? '...' : 'Add'}</button>
             <button className="btn-ghost" onClick={() => { setAddingRole(false); setNewRoleName('') }}>Cancel</button>
           </div>
         )}
-
         <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
           {activeRoles.map(role => (
             <div key={role.id} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '12px 16px', background: 'var(--background)', borderRadius: '10px' }}>
@@ -448,7 +620,6 @@ function CandidatesTab({ roles, candidates, onRefresh }: { roles: Role[]; candid
         </div>
       </div>
 
-      {/* Candidates per role */}
       {activeRoles.map(role => {
         const roleCandidates = candidates.filter(c => c.role_id === role.id).sort((a,b) => a.display_order - b.display_order)
         const isAddingHere = addingCandidateForRole === role.id
@@ -456,40 +627,21 @@ function CandidatesTab({ roles, candidates, onRefresh }: { roles: Role[]; candid
           <div key={role.id} className="card" style={{ padding: '24px', marginBottom: '16px' }}>
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '20px' }}>
               <h3 style={{ fontWeight: '700', fontSize: '15px' }}>{role.name} Candidates</h3>
-              <button className="btn-primary" onClick={() => { setAddingCandidateForRole(role.id); setNewCandidateName('') }} style={{ padding: '8px 14px', fontSize: '13px' }}>+ Add Candidate</button>
+              <button className="btn-primary" onClick={() => { setAddingCandidateForRole(role.id); setNewCandidateName('') }} style={{ padding: '8px 14px', fontSize: '13px' }}>+ Add</button>
             </div>
-
             {isAddingHere && (
-              <AddCandidateForm
-                name={newCandidateName}
-                onNameChange={setNewCandidateName}
-                onSave={(file) => handleAddCandidate(file)}
-                onCancel={() => { setAddingCandidateForRole(null); setNewCandidateName('') }}
-                saving={saving}
-                uploading={uploading}
-              />
+              <AddCandidateForm name={newCandidateName} onNameChange={setNewCandidateName} onSave={(file) => handleAddCandidate(file)} onCancel={() => { setAddingCandidateForRole(null); setNewCandidateName('') }} saving={saving} uploading={uploading} />
             )}
-
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: '12px' }}>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))', gap: '12px' }}>
               {roleCandidates.map(candidate => (
                 <div key={candidate.id}>
-                  {editingCandidate?.id === candidate.id ? (
-                    <EditCandidateForm
-                      candidate={editingCandidate}
-                      onChange={setEditingCandidate}
-                      onSave={(file) => handleUpdateCandidate(file)}
-                      onCancel={() => setEditingCandidate(null)}
-                      saving={saving}
-                      uploading={uploading}
-                    />
-                  ) : (
-                    <CandidateCard candidate={candidate} onEdit={() => setEditingCandidate(candidate)} onDelete={() => handleDeleteCandidate(candidate)} />
-                  )}
+                  {editingCandidate?.id === candidate.id
+                    ? <EditCandidateForm candidate={editingCandidate} onChange={setEditingCandidate} onSave={(file) => handleUpdateCandidate(file)} onCancel={() => setEditingCandidate(null)} saving={saving} uploading={uploading} />
+                    : <CandidateCard candidate={candidate} onEdit={() => setEditingCandidate(candidate)} onDelete={() => handleDeleteCandidate(candidate)} />
+                  }
                 </div>
               ))}
-              {roleCandidates.length === 0 && !isAddingHere && (
-                <p style={{ color: 'var(--muted)', fontSize: '13px', gridColumn: '1/-1' }}>No candidates yet. Add one above.</p>
-              )}
+              {roleCandidates.length === 0 && !isAddingHere && <p style={{ color: 'var(--muted)', fontSize: '13px', gridColumn: '1/-1' }}>No candidates yet.</p>}
             </div>
           </div>
         )
@@ -501,17 +653,14 @@ function CandidatesTab({ roles, candidates, onRefresh }: { roles: Role[]; candid
 function CandidateCard({ candidate, onEdit, onDelete }: { candidate: Candidate; onEdit: () => void; onDelete: () => void }) {
   return (
     <div style={{ border: '1px solid var(--border)', borderRadius: '12px', overflow: 'hidden', background: 'white' }}>
-      <div style={{ height: '120px', background: candidate.photo_url ? 'transparent' : 'var(--accent-light)', display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden' }}>
-        {candidate.photo_url
-          ? <img src={candidate.photo_url} alt={candidate.name} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
-          : <span style={{ fontSize: '40px', color: 'var(--accent)' }}>👤</span>
-        }
+      <div style={{ height: '110px', background: candidate.photo_url ? 'transparent' : 'var(--accent-light)', display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden' }}>
+        {candidate.photo_url ? <img src={candidate.photo_url} alt={candidate.name} style={{ width: '100%', height: '100%', objectFit: 'cover' }} /> : <span style={{ fontSize: '36px' }}>👤</span>}
       </div>
-      <div style={{ padding: '12px' }}>
-        <div style={{ fontWeight: '700', fontSize: '14px', marginBottom: '10px' }}>{candidate.name}</div>
+      <div style={{ padding: '10px 12px' }}>
+        <div style={{ fontWeight: '700', fontSize: '14px', marginBottom: '8px' }}>{candidate.name}</div>
         <div style={{ display: 'flex', gap: '6px' }}>
-          <button onClick={onEdit} style={{ flex: 1, padding: '6px', borderRadius: '6px', border: '1px solid var(--border)', background: 'transparent', cursor: 'pointer', fontSize: '12px', fontWeight: '600', color: 'var(--muted)' }}>✏️ Edit</button>
-          <button onClick={onDelete} style={{ flex: 1, padding: '6px', borderRadius: '6px', border: '1px solid var(--danger)', background: 'transparent', cursor: 'pointer', fontSize: '12px', fontWeight: '600', color: 'var(--danger)' }}>🗑</button>
+          <button onClick={onEdit} style={{ flex: 1, padding: '5px', borderRadius: '6px', border: '1px solid var(--border)', background: 'transparent', cursor: 'pointer', fontSize: '11px', fontWeight: '600', color: 'var(--muted)' }}>✏️ Edit</button>
+          <button onClick={onDelete} style={{ flex: 1, padding: '5px', borderRadius: '6px', border: '1px solid var(--danger)', background: 'transparent', cursor: 'pointer', fontSize: '11px', fontWeight: '600', color: 'var(--danger)' }}>🗑</button>
         </div>
       </div>
     </div>
@@ -522,24 +671,17 @@ function AddCandidateForm({ name, onNameChange, onSave, onCancel, saving, upload
   const [file, setFile] = useState<File | null>(null)
   const [preview, setPreview] = useState<string | null>(null)
   const ref = useRef<HTMLInputElement>(null)
-  const handleFile = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const f = e.target.files?.[0]
-    if (f) { setFile(f); setPreview(URL.createObjectURL(f)) }
-  }
+  const handleFile = (e: React.ChangeEvent<HTMLInputElement>) => { const f = e.target.files?.[0]; if (f) { setFile(f); setPreview(URL.createObjectURL(f)) } }
   return (
     <div style={{ background: 'var(--accent-light)', borderRadius: '12px', padding: '16px', marginBottom: '16px' }}>
       <input type="text" value={name} onChange={e => onNameChange(e.target.value)} placeholder="Candidate name" autoFocus style={{ marginBottom: '10px' }} />
       <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '12px' }}>
-        {preview && <img src={preview} style={{ width: '48px', height: '48px', borderRadius: '8px', objectFit: 'cover' }} alt="preview" />}
-        <button type="button" onClick={() => ref.current?.click()} style={{ padding: '8px 14px', borderRadius: '8px', border: '1px dashed var(--accent)', background: 'white', color: 'var(--accent)', cursor: 'pointer', fontSize: '13px', fontWeight: '600' }}>
-          {file ? '📷 Change Photo' : '📷 Add Photo'}
-        </button>
+        {preview && <img src={preview} style={{ width: '44px', height: '44px', borderRadius: '8px', objectFit: 'cover' }} alt="preview" />}
+        <button type="button" onClick={() => ref.current?.click()} style={{ padding: '7px 14px', borderRadius: '8px', border: '1px dashed var(--accent)', background: 'white', color: 'var(--accent)', cursor: 'pointer', fontSize: '13px', fontWeight: '600' }}>📷 {file ? 'Change' : 'Add Photo'}</button>
         <input ref={ref} type="file" accept="image/*" onChange={handleFile} style={{ display: 'none' }} />
       </div>
       <div style={{ display: 'flex', gap: '8px' }}>
-        <button className="btn-primary" onClick={() => onSave(file || undefined)} disabled={!name.trim() || saving} style={{ padding: '8px 16px', fontSize: '13px' }}>
-          {uploading ? 'Uploading...' : saving ? 'Saving...' : 'Add Candidate'}
-        </button>
+        <button className="btn-primary" onClick={() => onSave(file || undefined)} disabled={!name.trim() || saving} style={{ padding: '8px 16px', fontSize: '13px' }}>{uploading ? 'Uploading...' : saving ? 'Saving...' : 'Add Candidate'}</button>
         <button className="btn-ghost" onClick={onCancel}>Cancel</button>
       </div>
     </div>
@@ -550,25 +692,18 @@ function EditCandidateForm({ candidate, onChange, onSave, onCancel, saving, uplo
   const [file, setFile] = useState<File | null>(null)
   const [preview, setPreview] = useState<string | null>(null)
   const ref = useRef<HTMLInputElement>(null)
-  const handleFile = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const f = e.target.files?.[0]
-    if (f) { setFile(f); setPreview(URL.createObjectURL(f)) }
-  }
+  const handleFile = (e: React.ChangeEvent<HTMLInputElement>) => { const f = e.target.files?.[0]; if (f) { setFile(f); setPreview(URL.createObjectURL(f)) } }
   return (
-    <div style={{ border: '2px solid var(--accent)', borderRadius: '12px', padding: '14px', background: 'var(--accent-light)' }}>
-      <input type="text" value={candidate.name} onChange={e => onChange({ ...candidate, name: e.target.value })} autoFocus style={{ marginBottom: '10px' }} />
-      <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '10px' }}>
-        <img src={preview || candidate.photo_url || ''} alt="" style={{ width: '44px', height: '44px', borderRadius: '8px', objectFit: 'cover', display: (preview || candidate.photo_url) ? 'block' : 'none' }} />
-        <button type="button" onClick={() => ref.current?.click()} style={{ padding: '6px 12px', borderRadius: '8px', border: '1px dashed var(--accent)', background: 'white', color: 'var(--accent)', cursor: 'pointer', fontSize: '12px', fontWeight: '600' }}>
-          📷 {candidate.photo_url ? 'Change' : 'Add Photo'}
-        </button>
+    <div style={{ border: '2px solid var(--accent)', borderRadius: '12px', padding: '12px', background: 'var(--accent-light)' }}>
+      <input type="text" value={candidate.name} onChange={e => onChange({ ...candidate, name: e.target.value })} autoFocus style={{ marginBottom: '8px' }} />
+      <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px' }}>
+        <img src={preview || candidate.photo_url || ''} alt="" style={{ width: '40px', height: '40px', borderRadius: '8px', objectFit: 'cover', display: (preview || candidate.photo_url) ? 'block' : 'none' }} />
+        <button type="button" onClick={() => ref.current?.click()} style={{ padding: '5px 10px', borderRadius: '6px', border: '1px dashed var(--accent)', background: 'white', color: 'var(--accent)', cursor: 'pointer', fontSize: '11px', fontWeight: '600' }}>📷 {candidate.photo_url ? 'Change' : 'Add'}</button>
         <input ref={ref} type="file" accept="image/*" onChange={handleFile} style={{ display: 'none' }} />
       </div>
       <div style={{ display: 'flex', gap: '6px' }}>
-        <button className="btn-primary" onClick={() => onSave(file || undefined)} disabled={saving} style={{ padding: '7px 12px', fontSize: '12px' }}>
-          {uploading ? 'Uploading...' : saving ? '...' : 'Save'}
-        </button>
-        <button className="btn-ghost" onClick={onCancel} style={{ padding: '7px 12px', fontSize: '12px' }}>Cancel</button>
+        <button className="btn-primary" onClick={() => onSave(file || undefined)} disabled={saving} style={{ padding: '6px 12px', fontSize: '12px' }}>{uploading ? 'Uploading...' : saving ? '...' : 'Save'}</button>
+        <button className="btn-ghost" onClick={onCancel} style={{ padding: '6px 10px', fontSize: '12px' }}>Cancel</button>
       </div>
     </div>
   )

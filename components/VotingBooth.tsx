@@ -27,7 +27,7 @@ function playBeep() {
 
 // ── Booth Settings Panel ─────────────────────────────────
 
-function BoothSettings({ booth, roles, onClose }: { booth: number; roles: Role[]; onClose: () => void }) {
+function BoothSettings({ booth, roles, allRoles, onClose }: { booth: number; roles: Role[]; allRoles: Role[]; onClose: () => void }) {
   const [syncEnabled, setSyncEnabledState] = useState(() => getSyncEnabled(booth))
   const [localVotes, setLocalVotes] = useState<LocalVote[]>([])
   const [tallies, setTallies] = useState<Record<string, Record<string, number>>>({})
@@ -38,6 +38,20 @@ function BoothSettings({ booth, roles, onClose }: { booth: number; roles: Role[]
   const [resetting, setResetting] = useState(false)
   const [syncing, setSyncing] = useState(false)
   const [syncMsg, setSyncMsg] = useState('')
+  const [selectedRoleIds, setSelectedRoleIds] = useState<number[]>(roles.map(r => r.id))
+  const [savingRoles, setSavingRoles] = useState(false)
+
+  const toggleRole = (id: number) => setSelectedRoleIds(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id])
+
+  const handleSaveRoles = async () => {
+    setSavingRoles(true)
+    await supabase.from('booth_roles').delete().eq('booth', booth)
+    if (selectedRoleIds.length !== allRoles.length) {
+      const rows = selectedRoleIds.map(rid => ({ booth, role_id: rid }))
+      if (rows.length > 0) await supabase.from('booth_roles').insert(rows)
+    }
+    setSavingRoles(false)
+  }
 
   const refresh = useCallback(() => {
     setLocalVotes(getLocalVotes(booth))
@@ -148,6 +162,25 @@ function BoothSettings({ booth, roles, onClose }: { booth: number; roles: Role[]
             </div>
           </div>
 
+          {/* Role Assignment */}
+          {allRoles.length > 0 && (
+            <div style={{ borderRadius: '12px', border: '1px solid var(--border)', overflow: 'hidden' }}>
+              <div style={{ padding: '14px 16px', background: 'var(--background)', borderBottom: '1px solid var(--border)', fontWeight: '700', fontSize: '14px' }}>🗳️ Roles This Booth Votes For</div>
+              <div style={{ padding: '16px' }}>
+                <p style={{ fontSize: '12px', color: 'var(--muted)', marginBottom: '12px' }}>Select all to vote for every role. Deselect to skip a role on this booth.</p>
+                {allRoles.map(role => (
+                  <label key={role.id} style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '10px', cursor: 'pointer' }}>
+                    <input type="checkbox" checked={selectedRoleIds.includes(role.id)} onChange={() => toggleRole(role.id)} style={{ accentColor: 'var(--accent)', width: '16px', height: '16px' }} />
+                    <span style={{ fontSize: '14px', fontWeight: '500' }}>{role.name}</span>
+                  </label>
+                ))}
+                <button className="btn-primary" onClick={handleSaveRoles} disabled={savingRoles || selectedRoleIds.length === 0} style={{ marginTop: '4px', padding: '8px 16px', fontSize: '13px' }}>
+                  {savingRoles ? 'Saving...' : 'Save Role Assignment'}
+                </button>
+              </div>
+            </div>
+          )}
+
           {!resetMode ? (
             <button onClick={() => setResetMode(true)} style={{ padding: '12px', borderRadius: '10px', border: '2px solid var(--danger)', background: 'transparent', color: 'var(--danger)', fontWeight: '600', cursor: 'pointer', fontSize: '14px' }}>🗑 Reset Votes for This Booth</button>
           ) : (
@@ -211,18 +244,25 @@ export default function VotingBooth() {
   }, [booth])
 
   const loadData = useCallback(async () => {
-    const [rolesRes, candidatesRes, settingsRes] = await Promise.all([
+    const [rolesRes, candidatesRes, settingsRes, boothRolesRes] = await Promise.all([
       supabase.from('roles').select('*').eq('active', true).order('display_order'),
       supabase.from('candidates').select('*').eq('active', true).order('display_order'),
       supabase.from('election_settings').select('voting_open').single(),
+      supabase.from('booth_roles').select('role_id').eq('booth', booth),
     ])
-    if (rolesRes.data) setRoles(rolesRes.data)
+    if (rolesRes.data) {
+      const allRoles: Role[] = rolesRes.data
+      // Filter to assigned roles; if none assigned, use all
+      const assignedIds = boothRolesRes.data?.map((r: any) => r.role_id) ?? []
+      const filtered = assignedIds.length > 0 ? allRoles.filter(r => assignedIds.includes(r.id)) : allRoles
+      setRoles(filtered)
+    }
     if (candidatesRes.data) setCandidates(candidatesRes.data)
     if (settingsRes.data) {
       setElectionOpen(settingsRes.data.voting_open)
       if (!settingsRes.data.voting_open) setStep('closed')
     }
-  }, [])
+  }, [booth])
 
   const trySyncPending = useCallback(async () => {
     if (!getSyncEnabled(booth)) return
@@ -245,6 +285,7 @@ export default function VotingBooth() {
       })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'roles' }, loadData)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'candidates' }, loadData)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'booth_roles' }, loadData)
       .subscribe()
     const syncInterval = setInterval(trySyncPending, 30000)
     return () => { supabase.removeChannel(channel); clearInterval(syncInterval) }
@@ -388,7 +429,7 @@ export default function VotingBooth() {
 
   return (
     <div style={{ minHeight: '100vh', background: 'linear-gradient(135deg, #f8f9fc 0%, #eef2ff 100%)', display: 'flex', flexDirection: 'column' }}>
-      {showSettings && <BoothSettings booth={booth} roles={activeRoles} onClose={() => { setShowSettings(false); refreshLocal() }} />}
+      {showSettings && <BoothSettings booth={booth} roles={activeRoles} allRoles={roles} onClose={() => { setShowSettings(false); refreshLocal(); loadData() }} />}
 
       {showSettingsPrompt && (
         <div style={{ position: 'fixed', inset: 0, zIndex: 100, background: 'rgba(15,23,42,0.6)', backdropFilter: 'blur(4px)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '24px' }}>
