@@ -9,7 +9,6 @@ import {
   getLocalVoteCount, getUnsyncedVoteCount, getSyncedVoteCount, LocalVote
 } from '@/lib/localStore'
 
-const PASSWORD = 'BMIS1815$$#'
 
 type VotingStep = 'welcome' | 'voting' | 'loading' | 'success' | 'closed'
 
@@ -27,7 +26,7 @@ function playBeep() {
 
 // ── Booth Settings Panel ─────────────────────────────────
 
-function BoothSettings({ booth, roles, allRoles, onClose }: { booth: number; roles: Role[]; allRoles: Role[]; onClose: () => void }) {
+function BoothSettings({ booth, roles, allRoles, adminPassword, onClose }: { booth: number; roles: Role[]; allRoles: Role[]; adminPassword: string; onClose: () => void }) {
   const [syncEnabled, setSyncEnabledState] = useState(() => getSyncEnabled(booth))
   const [localVotes, setLocalVotes] = useState<LocalVote[]>([])
   const [tallies, setTallies] = useState<Record<string, Record<string, number>>>({})
@@ -84,7 +83,7 @@ function BoothSettings({ booth, roles, allRoles, onClose }: { booth: number; rol
   }
 
   const handleReset = async () => {
-    if (resetPassword !== PASSWORD) { setResetError('Incorrect password.'); return }
+    if (resetPassword !== adminPassword) { setResetError('Incorrect admin password.'); return }
     if (!resetOptions.database && !resetOptions.allLocal) { setResetError('Select at least one option.'); return }
     setResetting(true); setResetError('')
     if (resetOptions.database) { await supabase.from('votes').delete().eq('booth', booth) }
@@ -433,7 +432,7 @@ export default function VotingBooth() {
 
   return (
     <div style={{ minHeight: '100vh', background: 'linear-gradient(135deg, #f8f9fc 0%, #eef2ff 100%)', display: 'flex', flexDirection: 'column' }}>
-      {showSettings && <BoothSettings booth={booth} roles={activeRoles} allRoles={allRoles} onClose={() => { setShowSettings(false); refreshLocal(); loadData() }} />}
+      {showSettings && <BoothSettings booth={booth} roles={activeRoles} allRoles={allRoles} adminPassword={adminPassword} onClose={() => { setShowSettings(false); refreshLocal(); loadData() }} />}
 
       {showSettingsPrompt && (
         <div style={{ position: 'fixed', inset: 0, zIndex: 100, background: 'rgba(15,23,42,0.6)', backdropFilter: 'blur(4px)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '24px' }}>
@@ -480,7 +479,6 @@ export default function VotingBooth() {
               <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="M9 12l2 2 4-4"/><circle cx="12" cy="12" r="9"/></svg>
             </div>
             <h1 style={{ fontSize: '32px', fontWeight: '800', letterSpacing: '-1px', lineHeight: 1.1 }}>BMIS Elections</h1>
-            <p style={{ fontSize: '20px', fontWeight: '600', color: 'var(--accent)', marginTop: '6px' }}>2026 – 27</p>
             <p style={{ marginTop: '16px', color: 'var(--muted)', fontSize: '15px', lineHeight: 1.6 }}>
               You are voting from <strong style={{ color: 'var(--foreground)' }}>Booth {booth}</strong>.<br />
               Press the button below when you are ready to vote.
