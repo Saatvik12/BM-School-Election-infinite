@@ -16,7 +16,6 @@ type AuthContextType = {
 }
 
 const AuthContext = createContext<AuthContextType | null>(null)
-const VALID_PASSWORD = 'BMIS1815$$#'
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [session, setSession] = useState<Session | null>(null)
@@ -29,29 +28,29 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [])
 
   const login = async (username: string, password: string): Promise<{ ok: boolean; error?: string }> => {
-    if (password !== VALID_PASSWORD) return { ok: false, error: 'Invalid username or password.' }
+    // Fetch passwords and booth count from DB
+    const { data, error } = await supabase
+      .from('election_settings')
+      .select('admin_password, booth_password, booth_count')
+      .single()
+
+    if (error || !data) return { ok: false, error: 'Could not connect to server.' }
+
+    const adminPassword = data.admin_password
+    const boothPassword = data.booth_password
+    const maxBooths = data.booth_count ?? 6
 
     let newSession: Session | null = null
 
     if (username === 'Admin') {
+      if (password !== adminPassword) return { ok: false, error: 'Invalid username or password.' }
       newSession = { username: 'Admin', booth: null, isAdmin: true }
     } else {
       const match = username.match(/^VotingBooth(\d+)$/)
       if (!match) return { ok: false, error: 'Invalid username or password.' }
-
+      if (password !== boothPassword) return { ok: false, error: 'Invalid username or password.' }
       const boothNum = parseInt(match[1])
-
-      // Check allowed booth count from database
-      const { data } = await supabase
-        .from('election_settings')
-        .select('booth_count')
-        .single()
-
-      const maxBooths = data?.booth_count ?? 6
-      if (boothNum < 1 || boothNum > maxBooths) {
-        return { ok: false, error: `Invalid booth. Only Booth 1–${maxBooths} are active.` }
-      }
-
+      if (boothNum < 1 || boothNum > maxBooths) return { ok: false, error: `Invalid booth. Only Booth 1–${maxBooths} are active.` }
       newSession = { username, booth: boothNum, isAdmin: false }
     }
 

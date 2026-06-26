@@ -454,7 +454,7 @@ function ChangePasswordCard() {
     if (adminNew.length < 6) { setAdminError('Password must be at least 6 characters.'); return }
     setSavingAdmin(true)
     const { data } = await supabase.from('election_settings').select('admin_password').single()
-    if (data?.admin_password !== adminCurrent) { setAdminError('Current password is incorrect.'); setSavingAdmin(false); return }
+    if (!data || data.admin_password !== adminCurrent) { setAdminError('Current password is incorrect.'); setSavingAdmin(false); return }
     await supabase.from('election_settings').update({ admin_password: adminNew }).eq('id', 1)
     setAdminMsg('✓ Admin password updated.'); setAdminCurrent(''); setAdminNew(''); setAdminConfirm('')
     setSavingAdmin(false)
@@ -466,7 +466,7 @@ function ChangePasswordCard() {
     if (boothNew.length < 6) { setBoothError('Password must be at least 6 characters.'); return }
     setSavingBooth(true)
     const { data } = await supabase.from('election_settings').select('admin_password').single()
-    if (data?.admin_password !== boothAdminPw) { setBoothError('Admin password is incorrect.'); setSavingBooth(false); return }
+    if (!data || data.admin_password !== boothAdminPw) { setBoothError('Admin password is incorrect.'); setSavingBooth(false); return }
     await supabase.from('election_settings').update({ booth_password: boothNew }).eq('id', 1)
     setBoothMsg('✓ Booth password updated.'); setBoothNew(''); setBoothConfirm(''); setBoothAdminPw('')
     setSavingBooth(false)
