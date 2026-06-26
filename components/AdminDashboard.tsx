@@ -15,6 +15,8 @@ export default function AdminDashboard() {
   const [candidates, setCandidates] = useState<Candidate[]>([])
   const [boothStatuses, setBoothStatuses] = useState<BoothStatus[]>([])
   const [electionOpen, setElectionOpen] = useState(false)
+  const [boothCount, setBoothCount] = useState(6)
+  const [savingBoothCount, setSavingBoothCount] = useState(false)
   const [togglingElection, setTogglingElection] = useState(false)
   const [resetStep, setResetStep] = useState<0|1|2>(0)
   const [resetConfirmText, setResetConfirmText] = useState('')
@@ -34,7 +36,10 @@ export default function AdminDashboard() {
     if (rolesRes.data) setRoles(rolesRes.data)
     if (candidatesRes.data) setCandidates(candidatesRes.data)
     if (boothRes.data) setBoothStatuses(boothRes.data)
-    if (settingsRes.data) setElectionOpen(settingsRes.data.voting_open)
+    if (settingsRes.data) {
+      setElectionOpen(settingsRes.data.voting_open)
+      setBoothCount(settingsRes.data.booth_count ?? 6)
+    }
   }, [])
 
   useEffect(() => {
@@ -183,13 +188,13 @@ export default function AdminDashboard() {
                         <thead>
                           <tr style={{ borderBottom: '2px solid var(--border)' }}>
                             <th style={{ textAlign: 'left', padding: '6px 8px', color: 'var(--muted)', fontWeight: '700' }}>Candidate</th>
-                            {[1,2,3,4,5,6].map(b => <th key={b} style={{ textAlign: 'center', padding: '6px 8px', color: 'var(--muted)', fontWeight: '700' }}>B{b}</th>)}
+                            {Array.from({length: boothCount}, (_,i) => i+1).map(b => <th key={b} style={{ textAlign: 'center', padding: '6px 8px', color: 'var(--muted)', fontWeight: '700' }}>B{b}</th>)}
                             <th style={{ textAlign: 'center', padding: '6px 8px', color: 'var(--foreground)', fontWeight: '700' }}>Total</th>
                           </tr>
                         </thead>
                         <tbody>
                           {Object.keys(counts).sort().map(cand => {
-                            const boothCounts = [1,2,3,4,5,6].map(b => votes.filter(v => v.role_id === role.id && v.candidate_name === cand && v.booth === b).length)
+                            const boothCounts = Array.from({length: boothCount}, (_,i) => i+1).map(b => votes.filter(v => v.role_id === role.id && v.candidate_name === cand && v.booth === b).length)
                             return (
                               <tr key={cand} style={{ borderBottom: '1px solid var(--border)' }}>
                                 <td style={{ padding: '8px', fontWeight: '600' }}>{cand}</td>
@@ -220,7 +225,7 @@ export default function AdminDashboard() {
                 <button className="btn-ghost" onClick={loadAll} style={{ padding: '8px 16px', fontSize: '13px' }}>↻ Refresh</button>
               </div>
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: '12px' }}>
-                {[1,2,3,4,5,6].map(n => {
+                {Array.from({length: boothCount}, (_,i) => i+1).map(n => {
                   const booth = boothStatuses.find(b => b.booth === n)
                   const active = booth && isBoothActive(booth)
                   const lastSeen = booth ? new Date(booth.last_seen) : null
@@ -253,6 +258,23 @@ export default function AdminDashboard() {
         {/* SETTINGS TAB */}
         {tab === 'settings' && (
           <div className="animate-fadeIn" style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
+            <div className="card" style={{ padding: '24px' }}>
+              <h3 style={{ fontWeight: '700', fontSize: '16px', marginBottom: '6px' }}>Number of Voting Booths</h3>
+              <p style={{ color: 'var(--muted)', fontSize: '14px', marginBottom: '16px' }}>
+                Controls how many booths can log in (VotingBooth1 through VotingBooth{boothCount}).
+              </p>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                {[1,2,3,4,5,6,7,8,9,10].map(n => (
+                  <button key={n} onClick={() => setBoothCount(n)} style={{ width: '40px', height: '40px', borderRadius: '8px', border: `2px solid ${boothCount === n ? 'var(--accent)' : 'var(--border)'}`, background: boothCount === n ? 'var(--accent)' : 'transparent', color: boothCount === n ? 'white' : 'var(--foreground)', fontWeight: '700', cursor: 'pointer', fontSize: '15px', transition: 'all 0.15s ease' }}>
+                    {n}
+                  </button>
+                ))}
+              </div>
+              <button className="btn-primary" onClick={async () => { setSavingBoothCount(true); await supabase.from('election_settings').update({ booth_count: boothCount }).eq('id', 1); setSavingBoothCount(false) }} disabled={savingBoothCount} style={{ marginTop: '16px', padding: '10px 20px', fontSize: '14px' }}>
+                {savingBoothCount ? 'Saving...' : 'Save Booth Count'}
+              </button>
+            </div>
+
             <div className="card" style={{ padding: '24px' }}>
               <h3 style={{ fontWeight: '700', fontSize: '16px', marginBottom: '6px' }}>Election Status</h3>
               <p style={{ color: 'var(--muted)', fontSize: '14px', marginBottom: '20px' }}>Opening or closing affects all booths immediately.</p>
